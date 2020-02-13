@@ -358,6 +358,13 @@ class MlbApiScraper:
         else:
             return None, None, None
 
+    def get_player_data(self):
+
+        if self.as_db:
+            pass
+
+        return []
+
 def main():
 
     g_list, a_list, p_list = [], [], []
