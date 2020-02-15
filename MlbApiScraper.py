@@ -360,7 +360,14 @@ class MlbApiScraper:
 
     def get_player_data(self):
 
+        batter_dict = {}
         if self.as_db:
+            cnx = lite.connect(self.db_name + ".db")
+            unique_batter_query = "select distinct batter_id from abs"
+            batter_df = pd.read_sql(unique_batter_query, cnx)
+            for bt_id in batter_df.tolist():
+                url = "https://statsapi.mlb.com/api/v1/people/" + bt_id
+                id_dict = self.get_raw_url_data(url)
             pass
 
         return []
