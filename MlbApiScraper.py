@@ -1,10 +1,10 @@
-from __future__ import division
-import requests
 from datetime import datetime
-import pandas as pd
 import json
+import os
 import sqlite3 as lite
-import sys
+
+import requests
+import pandas as pd
 
 class MlbApiScraper:
 
@@ -16,22 +16,27 @@ class MlbApiScraper:
                  as_db=False,
                  as_csv=False,
                  db_name="",
-                 ds_name=""):
+                 ds_name="",
+                 save_dir="."):
 
         if seasons is None:
             seasons = list(range(2010, 2020))
         elif not isinstance(seasons, (tuple, list)):
             seasons = [seasons]
-        else:
+        elif len(seasons) == 2:
             seasons = list(range(seasons[0], seasons[1] + 1))
         if months is None:
             months = [3, 11]
         elif not isinstance(months, (tuple, list)):
             months = [months]
+        elif len(months) == 2:
+            months = list(range(months[0], months[1] + 1))
         if days is None:
             days = [1, 30]
         elif not isinstance(days, (tuple, list)):
             days = [days]
+        elif len(days) == 2:
+            days = list(range(days[0], days[1] + 1))
 
         # *** only add "flo" distinction if interest is in specific teams ***
         if teams is not None:
@@ -67,8 +72,17 @@ class MlbApiScraper:
 
         self.as_db = as_db
         self.as_csv = as_csv
-        self.ds_name = ds_name
-        self.db_name = db_name
+        self.save_dir = save_dir
+        if self.as_csv:
+            self.ds_name = ds_name
+            self.save_csv_loc = os.path.join(self.save_dir, self.ds_name)
+        elif self.as_db:
+            self.db_name = db_name
+            self.db_cnx = lite.connect(os.path.join(self.save_dir, self.db_name) + ".db")
+
+        self.all_game_df = None
+        self.all_ab_df = None
+        self.all_pitch_df = None
 
     def get_raw_url_data(self,
                          url):
@@ -90,8 +104,8 @@ class MlbApiScraper:
                     end_date = str(max(self.months)).zfill(2) + "/" + str(max(self.days)).zfill(2) + "/" + str(season)
                     date_list.append((start_date, end_date))
             else:
-                start_date = str(min(self.months)).zfill(2) + "/" + str(min(self.days)).zfill(2) + "/" + str(self.seasons)
-                end_date = str(max(self.months)).zfill(2) + "/" + str(max(self.days)).zfill(2) + "/" + str(self.seasons)
+                start_date = str(min(self.months)).zfill(2) + "/" + str(min(self.days)).zfill(2) + "/" + str(self.seasons[0])
+                end_date = str(max(self.months)).zfill(2) + "/" + str(max(self.days)).zfill(2) + "/" + str(self.seasons[0])
 
         if len(self.seasons) > 1:
             json_list = []
@@ -155,16 +169,18 @@ class MlbApiScraper:
         all_pitch_df = pd.concat(all_pitch_list, sort=False)
 
         if self.as_db:
-            connect = lite.connect(self.db_name + ".db")
-            all_game_df.to_sql(name="games", con=connect)
-            all_ab_df.to_sql(name="abs", con=connect)
-            all_pitch_df.to_sql(name="pitches", con=connect)
+            all_game_df.to_sql(name="games", con=self.db_cnx)
+            all_ab_df.to_sql(name="abs", con=self.db_cnx)
+            all_pitch_df.to_sql(name="pitches", con=self.db_cnx)
         elif self.as_csv:
-            all_game_df.to_csv(self.ds_name + "_games.csv")
-            all_ab_df.to_csv(self.ds_name + "_abs.csv")
-            all_pitch_df.to_csv(self.ds_name + "_pitches.csv")
+            all_game_df.to_csv(self.save_csv_loc + "_games.csv")
+            all_ab_df.to_csv(self.save_csv_loc + "_abs.csv")
+            all_pitch_df.to_csv(self.save_csv_loc + "_pitches.csv")
         else:
-            return all_game_df, all_ab_df, all_pitch_df
+            self.all_game_df = all_game_df
+            self.all_ab_df = all_ab_df
+            self.all_pitch_df = all_pitch_df
+            return self
 
     def build_game_dictionary(self, game_json):
 
@@ -360,21 +376,42 @@ class MlbApiScraper:
 
     def get_player_data(self):
 
-        batter_dict = {}
-        if self.as_db:
-            cnx = lite.connect(self.db_name + ".db")
+        player_dict = {}
+        if self.as_csv:
+            batter_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["batter_id"].unique()
+            pitcher_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["pitcher_id"].unique()
+        elif self.as_db:
             unique_batter_query = "select distinct batter_id from abs"
-            batter_df = pd.read_sql(unique_batter_query, cnx)
-            for bt_id in batter_df.tolist():
-                url = "https://statsapi.mlb.com/api/v1/people/" + bt_id
-                id_dict = self.get_raw_url_data(url)
-            pass
+            batter_df = pd.read_sql(unique_batter_query, self.db_cnx)
+            unique_pitcher_query = "select distinct pitcher_id from abs"
+            pitcher_df = pd.read_sql(unique_pitcher_query, self.db_cnx)
+        else:
+            batter_df = self.all_ab_df["batter_id"].unique()
+            pitcher_df = self.all_ab_df["pitcher_id"].unique()
+
+        player_list = list(set(batter_df.tolist() + pitcher_df.tolist()))
+
+        for plyr_id in player_list:
+            url = "https://statsapi.mlb.com/api/v1/people/" + str(plyr_id)
+            id_dict = self.get_raw_url_data(url)
+            plyr_dict = json.loads(id_dict)
+            temp_dict = {}
+
+            plyr_dict_vals = ["firstName", "lastName", "birthDate", "birthCountry", "height", "weight", "draftYear", "strikeZoneTop", "strikeZoneBottom"]
+            for val in plyr_dict_vals:
+                temp_dict[val] = plyr_dict[val]
+            plyr_pos_vals = list(plyr_dict["primaryPosition"].keys())
+            for pval in plyr_pos_vals:
+                temp_dict["pos" + pval] = plyr_dict["primaryPosition"][pval]
+            temp_dict["batHand"] = plyr_dict["batSide"]["code"]
+            temp_dict["pitchHand"] = plyr_dict["pitchHand"]["code"]
+            player_dict[plyr_id] = temp_dict
 
         return []
 
 def main():
 
-    g_list, a_list, p_list = [], [], []
+    """g_list, a_list, p_list = [], [], []
     for season in range(2010, 2020):
         cnx = lite.connect(str(season) + "_season.db")
         g_list.append(pd.read_sql("select * from games", cnx).reset_index(drop=True))
@@ -390,10 +427,12 @@ def main():
     all_as.to_sql(name="abs", con=connect)
     all_ps.to_sql(name="pitches", con=connect)
 
-    exit()
-    pfxs = MlbApiScraper(days=[1, 30], months=[2, 11], seasons=[2010, 2019], as_db=True, db_name="10_19_seasons")  # days=[10, 13], months=[8, 9], seasons=2019)
+    exit()"""
+
+    pfxs = MlbApiScraper(days=[1, 2], months=[5], seasons=[2019], as_db=False)  # days=[10, 13], months=[8, 9], seasons=2019)
 
     pfxs.get_all_api_game_dfs()
+    pfxs.get_player_data()
 
     exit()
 
