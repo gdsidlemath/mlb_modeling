@@ -13,10 +13,8 @@ class MlbApiScraper:
                  months=None,
                  days=None,
                  teams=None,
-                 as_db=False,
-                 as_csv=False,
+                 as_type=None,
                  db_name="",
-                 ds_name="",
                  save_dir="."):
 
         if seasons is None:
@@ -46,11 +44,24 @@ class MlbApiScraper:
                 if any(t == "flo" for t in teams) and not any(t == "mia" for t in teams):
                     teams.append("mia")
 
+        self.team_dict = {"ana": 108, "nya": 147, "bal": 110, "cle": 114, "chn": 112, "kca": 118,
+                          "was": 120, "det": 116, "cha": 145, "hou": 117, "tor": 141, "mia": 146,
+                          "col": 115, "mil": 158, "min": 142, "nyn": 121, "ari": 109, "oak": 133,
+                          "bos": 111, "pit": 134, "atl": 144, "sdn": 135, "cin": 113, "sfn": 137,
+                          "phi": 143, "sln": 138, "lan": 119, "tba": 139, "sea": 136, "tex": 140}
+
+
         if teams is None:
-            teams = ["ana", "nya", "bal", "cle", "chn", "was", "det", "cha", "hou",
+            teams_list = ["ana", "nya", "bal", "cle", "chn", "was", "det", "cha", "hou",
                      "tor", "mia", "col", "mil", "min", "nyn", "ari", "oak", "bos",
                      "pit", "atl", "sdn", "cin", "sfn", "phi", "sln", "lan",
                      "tba", "sea", "tex", "kca"]
+        else:
+            teams_list = teams
+
+        team_id_list = []
+        for tm in teams_list:
+            team_id_list.append(self.team_dict[tm.lower()])
 
         self.opening_day_dict = {2009: (4, 5),
                                  2010: (4, 4),
@@ -68,15 +79,13 @@ class MlbApiScraper:
         self.seasons = seasons
         self.months = months
         self.days = days
-        self.teams = teams
+        self.teams = team_id_list
 
-        self.as_db = as_db
-        self.as_csv = as_csv
+        self.as_type = as_type.lower()
         self.save_dir = save_dir
-        if self.as_csv:
-            self.ds_name = ds_name
-            self.save_csv_loc = os.path.join(self.save_dir, self.ds_name)
-        elif self.as_db:
+        if self.as_type == "csv":
+            self.save_csv_loc = os.path.join(self.save_dir, self.db_name)
+        elif self.as_type == "db":
             self.db_name = db_name
             self.db_cnx = lite.connect(os.path.join(self.save_dir, self.db_name) + ".db")
 
@@ -150,7 +159,8 @@ class MlbApiScraper:
 
         for d_dict in day_dicts:
             day_gid_list = [b["gamePk"] for b in d_dict if b["gameType"] in ["R", "F", "D", "L", "W"]]
-            temp_id_list.append(day_gid_list)
+            if b["teams"]["away"]["team"]["id"] in self.teams or b["teams"]["home"]["team"]["id"] in self.teams:
+                temp_id_list.append(day_gid_list)
 
         all_id_list = [gid for gid_list in temp_id_list for gid in gid_list]
 
@@ -168,11 +178,11 @@ class MlbApiScraper:
         all_ab_df = pd.concat(all_ab_list, sort=False)
         all_pitch_df = pd.concat(all_pitch_list, sort=False)
 
-        if self.as_db:
+        if self.as_type == "db":
             all_game_df.to_sql(name="games", con=self.db_cnx)
             all_ab_df.to_sql(name="abs", con=self.db_cnx)
             all_pitch_df.to_sql(name="pitches", con=self.db_cnx)
-        elif self.as_csv:
+        elif self.as_type == "csv":
             all_game_df.to_csv(self.save_csv_loc + "_games.csv")
             all_ab_df.to_csv(self.save_csv_loc + "_abs.csv")
             all_pitch_df.to_csv(self.save_csv_loc + "_pitches.csv")
@@ -272,6 +282,7 @@ class MlbApiScraper:
             game_dict = {
                 "g_id_int": game_data["game"]["pk"],
                 "g_id_str": game_data["game"]["id"].replace("/", "_").replace("-","_").replace("mlb", ""),
+                "game_date": int(game_data["datetime"]["originalDate"].replace("-", ""))
                 "home_team": game_data["teams"]["home"]["id"],
                 "ht_win_pct": game_data["teams"]["home"]["record"]["winningPercentage"],
                 "ht_gms_plyd": game_data["teams"]["home"]["record"]["gamesPlayed"],
@@ -324,6 +335,7 @@ class MlbApiScraper:
                                 tv = play["about"].pop(abt_val, None)
                                 if tv is not None:
                                     ab_info_dict[abt_val] = datetime.strptime(tv[:-5], "%Y-%m-%dT%H:%M:%S")
+                                    ab_info_dict[abt_val + "_int"] = int(tv[11:-5].replace(":", ""))
                                 else:
                                     ab_info_dict[abt_val] = tv
                             else:
@@ -377,10 +389,10 @@ class MlbApiScraper:
     def get_player_data(self):
 
         player_dict = {}
-        if self.as_csv:
+        if self.as_type == "csv":
             batter_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["batter_id"].unique()
             pitcher_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["pitcher_id"].unique()
-        elif self.as_db:
+        elif self.as_type == "db":
             unique_batter_query = "select distinct batter_id from abs"
             batter_df = pd.read_sql(unique_batter_query, self.db_cnx)
             unique_pitcher_query = "select distinct pitcher_id from abs"
@@ -397,7 +409,7 @@ class MlbApiScraper:
             plyr_dict = json.loads(id_dict)
             temp_dict = {}
 
-            plyr_dict_vals = ["firstName", "lastName", "birthDate", "birthCountry", "height", "weight", "draftYear", "strikeZoneTop", "strikeZoneBottom"]
+            plyr_dict_vals = ["id", "firstName", "lastName", "birthDate", "birthCountry", "height", "weight", "draftYear", "strikeZoneTop", "strikeZoneBottom"]
             for val in plyr_dict_vals:
                 temp_dict[val] = plyr_dict[val]
             plyr_pos_vals = list(plyr_dict["primaryPosition"].keys())
@@ -407,54 +419,23 @@ class MlbApiScraper:
             temp_dict["pitchHand"] = plyr_dict["pitchHand"]["code"]
             player_dict[plyr_id] = temp_dict
 
-        return []
+        player_df = pd.DataFrame(player_dict, index=list(player_dict.keys()))
+
+        if self.as_type == "db":
+            player_df.to_sql(name="players", con=self.db_cnx)
+        elif self.as_type == "csv":
+            player_df.to_csv(self.save_csv_loc + "_players.csv")
+        else:
+            self.player_df = player_df
+            return self
 
 def main():
 
-    """g_list, a_list, p_list = [], [], []
-    for season in range(2010, 2020):
-        cnx = lite.connect(str(season) + "_season.db")
-        g_list.append(pd.read_sql("select * from games", cnx).reset_index(drop=True))
-        a_list.append(pd.read_sql("select * from abs", cnx).reset_index(drop=True))
-        p_list.append(pd.read_sql("select * from pitches", cnx).reset_index(drop=True))
-
-    all_ps = pd.concat(p_list)
-    all_gs = pd.concat(g_list)
-    all_as = pd.concat(a_list)
-
-    connect = lite.connect("2010_2019_seasons.db")
-    all_gs.to_sql(name="games", con=connect)
-    all_as.to_sql(name="abs", con=connect)
-    all_ps.to_sql(name="pitches", con=connect)
-
-    exit()"""
-
-    pfxs = MlbApiScraper(days=[1, 2], months=[5], seasons=[2019], as_db=False)  # days=[10, 13], months=[8, 9], seasons=2019)
+    pfxs = MlbApiScraper(days=[1, 30], months=[2,11], seasons=[2010, 2019], as_db=True, db_name="2010_2019_seasons", save_dir="data")
 
     pfxs.get_all_api_game_dfs()
+
     pfxs.get_player_data()
 
-    exit()
-
-    #temp0.to_csv("temp.csv")
-
-    temp = pfxs.get_api_game_data(565932)
-
-    temp2 = pfxs.build_game_dataframes(temp)
-
-    #pfxs.get_game_list_by_day(3, 1, 2019)
-
-    #pitch_df = pfxs.get_all_game_dfs()
-
-    '''ab_dict, use_gid = pfxs.get_game_atbat_data("gid_2017_04_14_pitmlb_chnmlb_1")
-
-    pitch_df = pfxs.build_game_dataframe(ab_dict, use_gid)'''
-
-    #pitch_df.to_csv("all_pitch_data.csv")
-
 if __name__ == "__main__":
-
     main()
-
-
-
