@@ -4,6 +4,7 @@ import sqlite3 as lite
 
 import pandas as pd
 
+
 class BuildMlbModelData:
 
     def __init__(self,
@@ -24,11 +25,11 @@ class BuildMlbModelData:
 
         self.save_as_type = save_as_type.lower()
         self.save_dir = save_dir
-        self.save_name = save_name
+        self.save_as_name = save_as_name
         if self.save_as_type == "csv":
-            self.save_csv_loc = os.path.join(self.save_dir, self.save_name)
+            self.save_csv_loc = os.path.join(self.save_dir, self.save_as_name)
         elif self.save_as_type == "db":
-            self.save_db_cnx = lite.connect(os.path.join(self.save_dir, self.save_name) + ".db")
+            self.save_db_cnx = lite.connect(os.path.join(self.save_dir, self.save_as_name) + ".db")
 
     def build_pitcher_data(self, pitcher_id, date_until=None):
 

@@ -158,9 +158,8 @@ class MlbApiScraper:
         temp_id_list = []
 
         for d_dict in day_dicts:
-            day_gid_list = [b["gamePk"] for b in d_dict if b["gameType"] in ["R", "F", "D", "L", "W"]]
-            if b["teams"]["away"]["team"]["id"] in self.teams or b["teams"]["home"]["team"]["id"] in self.teams:
-                temp_id_list.append(day_gid_list)
+            day_gid_list = [b["gamePk"] for b in d_dict if b["gameType"] in ["R", "F", "D", "L", "W"] and (b["teams"]["away"]["team"]["id"] in self.teams or b["teams"]["home"]["team"]["id"] in self.teams)]
+            temp_id_list.append(day_gid_list)
 
         all_id_list = [gid for gid_list in temp_id_list for gid in gid_list]
 
@@ -282,7 +281,7 @@ class MlbApiScraper:
             game_dict = {
                 "g_id_int": game_data["game"]["pk"],
                 "g_id_str": game_data["game"]["id"].replace("/", "_").replace("-","_").replace("mlb", ""),
-                "game_date": int(game_data["datetime"]["originalDate"].replace("-", ""))
+                "game_date": int(game_data["datetime"]["originalDate"].replace("-", "")),
                 "home_team": game_data["teams"]["home"]["id"],
                 "ht_win_pct": game_data["teams"]["home"]["record"]["winningPercentage"],
                 "ht_gms_plyd": game_data["teams"]["home"]["record"]["gamesPlayed"],
@@ -431,7 +430,7 @@ class MlbApiScraper:
 
 def main():
 
-    pfxs = MlbApiScraper(days=[1, 30], months=[2,11], seasons=[2010, 2019], as_db=True, db_name="2010_2019_seasons", save_dir="data")
+    pfxs = MlbApiScraper(days=[1, 30], months=[5,6], seasons=[2018, 2019], as_type="db", db_name="2010_2019_seasons_temp", save_dir="data")
 
     pfxs.get_all_api_game_dfs()
 
