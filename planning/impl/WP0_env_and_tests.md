@@ -29,8 +29,12 @@ These are major-version upgrades, so "it imports" isn't enough.
 
 ---
 
-## Phase A: record reference output with the OLD interpreter (do this first)
+## Phase A: record reference output with the OLD stack (do this first)
 
+0. Check that `data/mlb_pitch_data_test.db` is the **clean** fixture: 84,873
+   pitches, with no duplicate `(g_id_int, ab_ind, p_ind)`. If it's missing or
+   different, regenerate it with `python3 utils/make_test_db.py`. That script
+   is stdlib-only and needs `data/mlb_pitch_data_2023.db` and `_2024.db`.
 1. Create `tests/__init__.py` (empty) and `tests/fixtures/reference/`.
 2. Create `tests/helpers.py`. It **must stay valid Python 3.8**, because
    Phase A runs it under 3.8: no `list[str]`, no `X | None`, no match
@@ -44,8 +48,10 @@ These are major-version upgrades, so "it imports" isn't enough.
    DATA_DIR = os.path.join(REPO_ROOT, "data")
    REFERENCE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "reference")
    TEST_DB_NAME = "mlb_pitch_data_test"
-   GOLDEN_PITCHER_ID = 666159
-   GOLDEN_BATTER_ID = ...   # see below
+   # Most pitches thrown / faced in the fixture db; both appear in both
+   # seasons, so the season-decay reference actually decays something.
+   GOLDEN_PITCHER_ID = 657277   # 490 pitches
+   GOLDEN_BATTER_ID = 668804    # 440 pitches
 
    def make_test_builder(**kwargs):
        """BuildMlbModelData wired to the small fixture db."""
@@ -53,11 +59,6 @@ These are major-version upgrades, so "it imports" isn't enough.
                                 load_name=TEST_DB_NAME, **kwargs)
    ```
 
-   `GOLDEN_BATTER_ID` is the batter with the most pitches faced in
-   `data/mlb_pitch_data_test.db`:
-   `select batter_id, count(*) from abs join pitches using (g_id_int, ab_ind)
-   group by batter_id order by 2 desc limit 1`. Hard-code the result, with a
-   comment saying how it was chosen.
 3. Create `tests/make_reference.py` (also valid Python 3.8). It inserts
    `REPO_ROOT` into `sys.path`, then writes three CSVs with
    `to_csv(path, index=False, float_format="%.17g")`:
@@ -68,7 +69,14 @@ These are major-version upgrades, so "it imports" isn't enough.
 
    The files are CSV, not pickle, because pandas 3 can't reliably read
    pickles written by pandas 1.5.
-4. Run it with the **old** interpreter: `py -3.8 tests/make_reference.py`.
+4. Run it with the **old** stack. It's recreated on demand with uv; this was
+   verified to work on 2026-09-25:
+   ```
+   uv run --no-project --python 3.8 --with pandas==1.5.0 --with numpy==1.23.3 \
+       python tests/make_reference.py
+   ```
+   Expect `pitcher.csv` to have 490 rows and `batter.csv` 440. **If the row
+   counts differ, stop.** It means the fixture has duplicates again.
 5. `.gitignore` ignores `*.csv`, so add these lines to keep the fixtures
    committable:
    ```
@@ -82,11 +90,11 @@ must reflect the untouched code.
 
 ## Phase B: create the Python 3.13 environment
 
-1. **uv on Windows.** Check with `uv --version`. If it's missing, **stop and
-   ask the orchestrator** before installing it. The suggested command is
-   `winget install --id astral-sh.uv -e`. (uv exists in this machine's WSL,
-   but the project runs on Windows.)
-2. `uv python install 3.13`
+1. Check `uv --version` (0.10.9 is at `~/.local/bin/uv`) and
+   `uv python list --only-installed` (it should include 3.13.12). If 3.13 is
+   missing, run `uv python install 3.13`.
+2. Add a `.gitattributes` containing `* text=auto eol=lf`. The repo was
+   previously edited from Windows, and this keeps line endings LF in WSL.
 3. Create `pyproject.toml`:
 
    ```toml

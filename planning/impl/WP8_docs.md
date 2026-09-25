@@ -10,9 +10,10 @@
    hours). Log to `data/model_table_build.log`:
    `uv run python build_model_table.py --table-name default > data/model_table_build.log 2>&1`
    (and `uv run python utils/...` for the scripts below)
-   Record the wall time, the peak memory if observable (Task Manager / a
-   `psutil` poll if installed; otherwise skip), the files written, and the
-   total size.
+   Wrap the command in `/usr/bin/time -v` and use `nohup` so the build
+   survives a closed terminal. Record the wall time, the peak memory
+   ("Maximum resident set size"), the files written, and the total size.
+   Confirm `free -g` shows about 31 GB before starting.
 
 2. **Column catalog.** Write `utils/describe_model_table.py`. It loads one
    season of a table (`load_model_table(seasons=[2024])`) and writes

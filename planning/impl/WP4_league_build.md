@@ -188,8 +188,9 @@ frame. Tests that modify raw tables use the `make_builder` factory instead.
 1. **Pitcher equivalence.** Get a fresh builder from `make_builder()`, call
    `_load_raw_tables()`, then
    replace `_pitches_df` with `MlbLabels.apply_global_filters(_pitches_df)`
-   so both paths see the same rows. Compare `build_pitcher_data(666159)`
-   with the league frame filtered to `pitcher_id == 666159`, with the `p_`
+   so both paths see the same rows. Compare
+   `build_pitcher_data(GOLDEN_PITCHER_ID)` with the league frame filtered to
+   that `pitcher_id`, with the `p_`
    prefix stripped. On the per-player frame's feature columns that exist in
    both, values must be equal (`rtol=1e-9`). Align rows on the three pitch
    keys. Cast non-numeric columns to `object` on both sides before comparing:
@@ -209,7 +210,9 @@ frame. Tests that modify raw tables use the `make_builder` factory instead.
 ### `tests/test_leakage.py` (the guard every later WP must keep passing)
 
 1. **Prefix invariance.** `full = build_league_frame()` and
-   `cut = build_league_frame(date_until=20240601)`. For every row in `cut`
+   `cut = build_league_frame(date_until=20240401)`. The fixture spans
+   2023-09-20..2024-04-07, so this cuts inside the 2024 slice. For every row
+   in `cut`
    (matched on the pitch keys), **every column** equals `full`, with NaN
    equal to NaN. A future-data leak anywhere makes this fail.
 2. **Same-row perturbation.** Pick rows that are the **last pitch in the
@@ -233,6 +236,10 @@ frame. Tests that modify raw tables use the `make_builder` factory instead.
    - wall time
    - `base.memory_usage(deep=True).sum()` (print it inside the method behind
      a `verbose` flag)
+   - peak RSS: run the command under `/usr/bin/time -v` and report "Maximum
+     resident set size". Check `free -g` first. If WSL shows about 11 GB
+     rather than about 31 GB, the `.wslconfig` change hasn't taken effect;
+     stop and report instead of running.
    - output file size, rows × cols
    - the number of `p_`/`b_` columns
 
