@@ -8,7 +8,8 @@
 
 1. **Full build.** Run the CLI over all seasons, in the background (it takes
    hours). Log to `data/model_table_build.log`:
-   `python build_model_table.py --table-name default > data/model_table_build.log 2>&1`
+   `uv run python build_model_table.py --table-name default > data/model_table_build.log 2>&1`
+   (and `uv run python utils/...` for the scripts below)
    Record the wall time, the peak memory if observable (Task Manager / a
    `psutil` poll if installed; otherwise skip), the files written, and the
    total size.

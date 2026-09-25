@@ -54,8 +54,9 @@ reproduce it):
   fill_value=0)` at predict time, so unseen categories become all-zero. Also
   convert the `on1b/on2b/on3b` ids to 0/1 occupancy flags, as the existing
   class does, for all estimators.
-- **random_forest only:** scikit-learn 1.3 RF doesn't accept NaN, so fill
-  NaN with -999. XGBoost keeps NaN.
+- **NaN:** leave it in place for all three estimators. scikit-learn ≥ 1.4
+  random forests handle missing values natively, as XGBoost and CatBoost do.
+  Don't add sentinel fills.
 - Drop any non-numeric column left after encoding. Store the final column
   list as `self.feature_cols_`.
 
@@ -94,7 +95,9 @@ Early stopping works as in the existing loops for xgboost/catboost. Store
 
 ## Tests (`tests/test_task_model.py`)
 
-Use the test-DB `build_league_frame()` once in `setUpClass`, with small
+Use the session-scoped `league_frame` fixture from `tests/conftest.py`
+(treat it as read-only), and use `@pytest.mark.parametrize` for the task ×
+estimator loops. Use small
 models (`n_estimators=20`, catboost `iterations=30`).
 
 1. Every task with `estimator="xgboost"`: fit and evaluate succeed, and every

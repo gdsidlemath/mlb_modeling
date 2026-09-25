@@ -112,11 +112,14 @@ Apply these checks in order and stop at the first match:
 ```python
 def column_tier(col: str) -> str
 def tier_table(columns) -> pd.DataFrame        # column, tier; for docs/debugging
-def feature_columns(columns, max_tier: str) -> List[str]
+def feature_columns(columns, max_tier: str) -> list[str]
     # all columns whose tier is in FEATURE_TIERS and <= max_tier; input order kept
-def categorical_columns(feature_cols, df) -> List[str]
-    # object/category dtype columns among feature_cols, plus any in
-    # ZONE_LIKE_COLUMNS present (zone codes are categories, not numbers)
+def categorical_columns(feature_cols, df) -> list[str]
+    # string, object or categorical columns among feature_cols. Detect them
+    # with pd.api.types.is_string_dtype / is_object_dtype /
+    # isinstance(dtype, pd.CategoricalDtype): pandas 3 strings are the `str`
+    # dtype, NOT object. Plus any ZONE_LIKE_COLUMNS present (zone codes are
+    # categories, not numbers).
 ZONE_LIKE_COLUMNS = ["zone", "prev_zone", "p_prev_zone", "b_prev_zone", "prev_ab_zone"]
 ```
 
@@ -124,8 +127,8 @@ ZONE_LIKE_COLUMNS = ["zone", "prev_zone", "p_prev_zone", "b_prev_zone", "prev_ab
 
 1. Every column of every table in `data/mlb_pitch_data_test.db` (`pitches`,
    `abs`, `games`) classifies without raising.
-2. Every column of `tests/fixtures/golden_pitcher.pkl` classifies without
-   raising.
+2. Every column of `test_builder.build_pitcher_data(GOLDEN_PITCHER_ID)`
+   (the legacy per-player output) classifies without raising.
 3. `feature_columns(cols, "T0_CONTEXT")` contains none of `type`, `zone`,
    `endSpeed`, `pX`, `code`, `y_swing`, `p_zone_5_this_type_vs_hand_career`,
    `b_swing_rate_this_zone_career`.
@@ -138,7 +141,10 @@ ZONE_LIKE_COLUMNS = ["zone", "prev_zone", "p_prev_zone", "b_prev_zone", "prev_ab
 7. No key appears twice in `RAW_COLUMN_TIERS`. Build the dict so a duplicate
    would be detectable, e.g. assert that the sum of the list lengths equals
    the number of keys.
+8. `categorical_columns` picks up a pandas 3 `str`-dtype column and
+   `prev_zone`, and skips float columns.
 
+Use the `test_builder` fixture from `tests/conftest.py` (WP0) for tests 1–2.
 For tests 3–5, `cols` is a hand-written list of example names mixing raw and
 derived columns.
 

@@ -111,7 +111,7 @@ SIDE_FEATURE_FAMILIES = {
    required columns), with types [FF, SL, FF, FF, SL, …] and known speeds.
    Assert `end_speed_this_type_career` on specific rows equals the mean of
    prior same-type speeds, and that the first FF row is NaN.
-2. **Tiers.** On the test-DB league frame, every new `p_`/`b_` column
+2. **Tiers.** On the `league_frame` fixture (WP4, `tests/conftest.py`), every new `p_`/`b_` column
    classifies with `MlbColumns.column_tier`. Every column containing
    `_this_type` is `T1_TYPE`, and every other new column is `T0_CONTEXT`.
 3. **Sanity on the test DB.** The Pearson correlation of

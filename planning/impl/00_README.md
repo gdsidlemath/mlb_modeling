@@ -9,17 +9,18 @@ after the spec was written.
 
 ## Before any WP starts (orchestrator / user)
 
-1. **Commit the current working tree.** `MlbBuildModelData.py` has
-   uncommitted changes and `MlbPitchPredictionModel.py` is untracked. An agent
-   in an isolated worktree starts from the last commit and will not see them.
-2. Optional: `pip install "pyarrow<18"` (the last line of releases that
-   supports Python 3.8). Without it, WP4 falls back to pickle files.
+1. **Commit the current working tree.** Done 2026-09-25 (commit `02b47a9`
+   on `claude/baseball-savant-api-13d052`). Commit again if anything changed
+   since. An agent in an isolated worktree starts from the last commit.
+2. **WP0 runs first and alone.** It moves the project from Python 3.8 /
+   pandas 1.5 to **Python 3.13 / pandas 3** and sets up pytest. Every later
+   WP assumes the environment WP0 creates.
 
 ## Work packages and order
 
 | WP | title | depends on | edits | suitable for |
 |---|---|---|---|---|
-| [WP0](WP0_baseline_tests.md) | Test harness + golden snapshots | – | new `tests/` | small model |
+| [WP0](WP0_env_and_tests.md) | Python 3.13 environment, pandas 3 port, pytest harness + reference snapshots | – | `pyproject.toml`, existing `.py` files (port only), new `tests/` | mid-size model |
 | [WP1](WP1_labels.md) | Label mappings and `y_*` columns | WP0 | new `MlbLabels.py` | small model |
 | [WP2](WP2_column_tiers.md) | Column tiers | WP0 | new `MlbColumns.py` | small model |
 | [WP3](WP3_builder_refactor.md) | Actor-keyed history helpers + last-2-innings fix | WP0 | `MlbBuildModelData.py` | mid-size model |
@@ -43,24 +44,63 @@ WP0 ─┬─ WP1 ─┐
   line to a registry list. Run them **sequentially** (a → b → c). If they do
   run in parallel, the only expected merge conflict is in the registry lists.
 
-## Environment facts (verified 2026-09-25)
+## Environment (set up by WP0)
 
-- **Python 3.8.0**, pandas 1.5.0, numpy 1.23.3, scikit-learn 1.3.2, xgboost
-  2.1.4, catboost 1.2.10. 48 GB RAM, 8 logical CPUs, Windows.
-- **Python 3.8 syntax only.** Do not use `list[str]` / `dict[str, int]` /
-  `X | None` in annotations (use `typing.List`, `Dict`, `Optional`), and
-  don't use `str.removeprefix`, `functools.cache` or the dict `|` operator.
-- **pandas 1.5 pitfalls:**
-  - `pd.get_dummies` returns `uint8`. A groupby `cumsum` upcasts to `uint64`,
-    so it's safe.
-  - **`groupby` drops rows whose key is NaN** (their result is NaN). Fill NaN
-    keys with a sentinel string such as `"NA"` before grouping, or pass
+- **Python 3.13**, in a project virtualenv (`.venv/`) managed by **uv**.
+  Dependencies live in `pyproject.toml` and are locked in `uv.lock`, both
+  committed. This version set was resolved for Windows on 2026-09-25:
+  pandas 3.0.6, numpy 2.5.3, scikit-learn 1.9.1, xgboost 3.4.1, catboost
+  1.2.10, pyarrow 25.0.1, pytest 9.1.1.
+- **Run everything through the venv:** `uv run python ...` and
+  `uv run pytest`. The bare `python` on this machine is still 3.8, so **never
+  call bare `python` or `pip`.**
+- Hardware: 48 GB RAM, 8 logical CPUs, Windows.
+- **Use modern syntax:** `list[str]`, `dict[str, int]` and `X | None` in
+  annotations, `str.removeprefix`, and `dataclass(slots=True)` where useful.
+  Don't add `typing.List` / `Optional` imports.
+- **pandas 3 rules** (these differ from what older examples and your
+  training data may show):
+  - **Copy-on-Write is always on.** Chained assignment
+    (`df["a"][mask] = x`, or `sub = df[mask]; sub["c"] = ...` expecting `df`
+    to change) never modifies the original. Use `df.loc[mask, "a"] = x`, and
+    treat every subset as an independent copy.
+  - **Strings default to the `str` dtype, not `object`.** Check with
+    `pd.api.types.is_string_dtype(s)` or `is_object_dtype(s)`, never with
+    `dtype == object`. `astype(str)` keeps NaN as NaN (it used to become the
+    string `"nan"`). `read_sql` returns `str` columns.
+  - **`pd.get_dummies` returns `bool`.** Pass `dtype=float` when the dummies
+    feed arithmetic.
+  - **`groupby` still drops rows whose key is NaN** (their result is NaN).
+    Fill NaN keys with a sentinel such as `"NA"` before grouping, or pass
     `dropna=False`.
+  - Categorical group keys default to `observed=True`.
+  - `groupby(...).apply` no longer passes the grouping columns to the
+    function. Select the columns you need explicitly.
+  - `DataFrame.applymap` is gone (use `DataFrame.map`), and so is
+    `fillna(method=...)` (use `ffill()`/`bfill()`).
   - `merge_asof` needs the `on` column sorted globally and free of NaN.
-  - There's no `DataFrame.map` (use `applymap`) and no `include_groups=` on
-    `groupby.apply`.
-- **No pytest.** Tests use stdlib `unittest`. Run them from the repo root:
-  `python -m unittest discover -s tests -t . -v`
+  - **Don't load pickles written by pandas 1.5.** Cross-version pickle
+    compatibility isn't guaranteed.
+- **numpy 2:** `np.NaN`, `np.Inf` and `np.float_` are gone. Use `np.nan`,
+  `np.inf` and `np.float64`.
+- **scikit-learn ≥ 1.4 random forests accept NaN natively.** Don't add
+  sentinel fills just for RF.
+- **Tests use pytest.** The config is in `pyproject.toml`
+  (`[tool.pytest.ini_options]`), and it turns `FutureWarning` and pandas'
+  `ChainedAssignmentError` into **errors**, so deprecated or
+  silently-ineffective pandas usage fails the suite. Run the suite from the
+  repo root:
+  `uv run pytest`
+  Conventions:
+  - Tests are plain `test_*` functions in `tests/test_*.py`. Don't write
+    `unittest.TestCase` classes.
+  - Put shared expensive objects (test builder, league frame) in **session-
+    or module-scoped fixtures** in `tests/conftest.py`, so they're built
+    once. Add new shared fixtures there, not in individual test files.
+  - Use the `tmp_path` fixture for scratch files (not `tempfile`), and
+    `@pytest.mark.parametrize` for per-task / per-estimator loops.
+  - Mark anything that reads a full-season DB with `@pytest.mark.slow`.
+    Those tests are skipped by default; run them with `uv run pytest -m slow`.
 - **Test fixture DB:** `data/mlb_pitch_data_test.db`: 92 games, 27,155
   pitches, 2024-04-01..2024-08-09. Build it with
   `BuildMlbModelData(data_as_type="db", load_dir="data", load_name="mlb_pitch_data_test")`.
@@ -76,12 +116,14 @@ WP0 ─┬─ WP1 ─┐
    Use the existing pattern `cumsum() - current` or `shift(1)`. Never include
    the current row.
 2. **Don't edit** `MlbApiScraper.py`, anything under `data/`, or
-   `MlbPitchPredictionModel.py` (WP7 builds a new class next to it).
+   `MlbPitchPredictionModel.py` (WP7 builds a new class next to it). The one
+   exception is WP0's Python 3.13 / pandas 3 port, which may touch any `.py`
+   file, but only to keep behavior identical.
 3. **Match the house style.** That means class-level UPPER_CASE constants,
    docstrings that explain *why*, sparse comments, and 4-space indents. Read
    the file you're editing before writing.
-4. **Every WP adds tests** under `tests/`, and the whole suite must pass
-   before you finish.
+4. **Every WP adds tests** under `tests/`, and the whole suite
+   (`uv run pytest`) must pass before you finish.
 5. **Don't commit** unless the orchestrator tells you to. When you finish,
    report: files changed, test output (pass/fail counts), anything in your WP
    you couldn't do or had to change, and any data surprises.

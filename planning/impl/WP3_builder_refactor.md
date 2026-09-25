@@ -1,7 +1,7 @@
 # WP3: Actor-keyed history helpers and the last-2-innings fix
 
-**Depends on:** WP0 (golden tests). **Edits:** `MlbBuildModelData.py`,
-`tests/test_golden.py` (only the `BATTER_COLUMNS_EXPECTED_TO_CHANGE`
+**Depends on:** WP0 (reference tests). **Edits:** `MlbBuildModelData.py`,
+`tests/test_reference.py` (only the `BATTER_COLUMNS_EXPECTED_TO_CHANGE`
 constant). **Creates:** `tests/test_history_helpers.py`.
 
 ## Goal
@@ -38,7 +38,7 @@ never uses it. Use it:
 | `prev_*` shifts | `groupby("g_id_int")` | `groupby([self_col, "g_id_int"])` |
 
 In a single-player frame `self_col` is constant, so the results are
-unchanged. The golden test proves it.
+unchanged. The reference tests (`tests/test_reference.py`) prove it.
 
 ### 2. Generalize the mix helper into `_group_cumulative_mean`
 
@@ -78,13 +78,15 @@ mean, n_obs = _group_cumulative_mean(df, type_cols, group_cols, suffix)
 return mean, n_obs
 ```
 
-The golden tests must pass with `rtol=1e-9`. If floating-point differences
-appear because the dummies are now cast to float, that tolerance absorbs them.
-Don't loosen it.
+The reference tests must pass at their `rtol=1e-9`. WP0 already made the
+dummies float (`dtype=float`), so the arithmetic is the same. Don't loosen the
+tolerance.
 
-**Group keys that can be NaN.** pandas 1.5 drops NaN-keyed groups. Inside
-`_group_cumulative_mean`, fill NaN in any **object-dtype** group column with
-`"NA"` on a temporary copy. Numeric ids are never NaN; leave those alone.
+**Group keys that can be NaN.** pandas drops NaN-keyed groups by default.
+Inside `_group_cumulative_mean`, fill NaN in any **string, object or
+categorical** group column with `"NA"` on a temporary copy. pandas 3 strings
+use the `str` dtype, so check with `pd.api.types.is_string_dtype` /
+`is_object_dtype`. Numeric ids are never NaN; leave those alone.
 
 ### 3. Fix `_last_two_innings_mix` (real bug, batter side)
 
@@ -103,22 +105,22 @@ by=game_cols, direction="backward")`, which needs both sides sorted by
 `inning_col`. Sort a copy, merge, then restore the original index order. Rows
 with no earlier inning get 0, as now.
 
-Then, in `tests/test_golden.py`, set:
+Then, in `tests/test_reference.py`, fill `BATTER_COLUMNS_EXPECTED_TO_CHANGE`
+with every column of `tests/fixtures/reference/batter.csv` that ends with
+`_last_2_innings`, plus `last_2_innings_n_pitches`. Read the CSV header
+rather than hard-coding the list. **Don't regenerate the reference CSVs.**
+They are the pre-port baseline, and the Python 3.8 interpreter that made them
+is going away.
 
-```python
-BATTER_COLUMNS_EXPECTED_TO_CHANGE = [c for c in golden_batter.columns
-                                     if c.endswith("_last_2_innings")] + ["last_2_innings_n_pitches"]
-```
-
-(Write it however fits the file, but keep the intent.) The **pitcher**
-golden tests must still pass unchanged. If they don't, the fix is wrong.
+The **pitcher** reference tests must still pass unchanged. If they don't,
+the fix is wrong.
 
 ### 4. Optional fixed dummy categories
 
 Add a parameter `type_categories=None` to `_build_pitch_mix_features`. When
 it's given, build the dummies as
-`pd.get_dummies(pd.Categorical(df["type"], categories=type_categories), prefix="type")`
-with `index=df.index`, so that columns exist for types absent from this
+`pd.get_dummies(pd.Categorical(df["type"], categories=type_categories), prefix="type", dtype=float)`
+with its index set to `df.index`, so that columns exist for types absent from this
 frame. When it's `None`, keep the current behavior. WP4 passes
 `MlbLabels.pitch_types(...)`.
 
@@ -161,8 +163,8 @@ checked by hand:
 
 ## Acceptance
 
-- The full suite passes: pitcher golden fixtures (both decay modes)
-  unchanged; batter golden unchanged apart from the listed last-2-innings
+- `uv run pytest` passes: both pitcher references (plain and season decay)
+  unchanged; batter reference unchanged apart from the listed last-2-innings
   columns.
-- Report how many batter rows' `*_last_2_innings` values changed on the
-  golden batter, as evidence the bug was real.
+- Report how many of the golden batter's rows have changed
+  `*_last_2_innings` values, as evidence the bug was real.

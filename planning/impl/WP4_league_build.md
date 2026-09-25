@@ -72,9 +72,9 @@ AB_FEATURE_FAMILIES = []
    `description`, `eventType`, `trajectory`, `hardness`, `location`,
    `weather_condition`, `wind_direction`, `day_night`, `halfInning`. **Don't**
    categorize `code`, `type`, `batter_stance`, `pitcher_hand` or the
-   `y_*`/`cur_*` columns. They're used as group keys or dummy sources, and
-   categorical group keys in pandas 1.5 (`observed=False`) produce Cartesian
-   products.
+   `y_*`/`cur_*` columns. They're group keys and dummy sources. Keeping them
+   as plain `str` avoids having to reason about categorical-groupby
+   semantics (`observed=`, unused categories) in every helper.
 
 ### `_side_features(self, sub, side)`
 
@@ -107,7 +107,7 @@ return pd.concat([frame, self._ab_features(frame)], axis=1)
 The `date_until` filter must happen **before** any features are computed
 (the leakage test depends on it).
 
-### `build_league_data(self, table_name="default", out_dir="data/model_tables", seasons=None, actor_chunk_size=200, file_format=None)`: chunked writer
+### `build_league_data(self, table_name="default", out_dir="data/model_tables", seasons=None, actor_chunk_size=200)`: chunked writer
 
 1. `base = self._league_pitch_frame()`. This is the full history. `seasons`
    (a list of ints, default = all seasons in `base`) selects only which
@@ -122,7 +122,7 @@ The `date_until` filter must happen **before** any features are computed
      float32.
    - Add the key columns `g_id_int, ab_ind, p_ind, season` from `sub`.
    - For each season in `seasons` present in the chunk, write
-     `_tmp/<side>/season=<YYYY>/chunk_<i>.pkl` (always pickle for tmp).
+     `_tmp/<side>/season=<YYYY>/chunk_<i>.parquet`.
    - Print a progress line per chunk: side, chunk i/n, rows, seconds.
 4. For each season in `seasons`:
    - `frame = base[base.season == s]`
@@ -131,17 +131,17 @@ The `date_until` filter must happen **before** any features are computed
      Assert the row count is unchanged and no side-feature column is entirely
      NaN.
    - `frame = concat([frame, self._ab_features(frame)], axis=1)`
-   - Write `table_dir/season=<YYYY>.<ext>`.
-5. Format: `file_format=None` means `"parquet"` if `import pyarrow`
-   succeeds, else `"pickle"` with a printed warning. Parquet can't store
-   mixed-type object columns: before writing, cast `on1b/on2b/on3b` to
-   float, and cast any remaining object column to `str` with NaN kept as
-   `None`.
+   - Write `table_dir/season=<YYYY>.parquet`.
+5. Format: always parquet. pyarrow is a project dependency (WP0). Parquet
+   can't store mixed-type `object` columns: before writing, cast
+   `on1b/on2b/on3b` to float, and cast any remaining `object`-dtype column to
+   `str`. pandas 3 keeps NaN as missing when you do this. Assert afterwards
+   that no `object` column remains.
 6. Write `table_dir/manifest.json` containing:
    - `table_name`, UTC `created_at`, `source` (list of load names)
    - `mix_decay_mode`, `mix_halflife_days`, `mix_season_decay`
    - `mappings` (the `MlbLabels.mapping_manifest(...)` output)
-   - `file_format`, `actor_chunk_size`
+   - `actor_chunk_size`, plus the `pandas` and `pyarrow` versions
    - `seasons`: `{year: {"rows": n, "cols": m}}`
    - `git_commit`: from `git rev-parse HEAD`, or `null` on failure
 7. Remove `_tmp` on success. On failure, leave it for debugging.
@@ -162,7 +162,7 @@ It uses argparse and takes these arguments:
 - `--dbs` (glob, default `data/mlb_pitch_data_20??.db`; never matches
   `_test`)
 - `--seasons` (e.g. `2023 2024`; default all)
-- `--table-name`, `--chunk-size`, `--format`
+- `--table-name`, `--chunk-size`
 - `--decay {none,season,day}`
 
 It prints elapsed time and the output paths. Look at
@@ -170,9 +170,23 @@ It prints elapsed time and the output paths. Look at
 
 ## Tests
 
+### Shared fixture: add to `tests/conftest.py`
+
+```python
+@pytest.fixture(scope="session")
+def league_frame(test_builder):
+    """build_league_frame() on the fixture db, built once per test session.
+    Read-only: copy before modifying."""
+    return test_builder.build_league_frame()
+```
+
+WP5a–WP7 reuse this fixture. Use it wherever a test just needs the league
+frame. Tests that modify raw tables use the `make_builder` factory instead.
+
 ### `tests/test_league_build.py` (test DB)
 
-1. **Pitcher equivalence.** Make a builder, call `_load_raw_tables()`, then
+1. **Pitcher equivalence.** Get a fresh builder from `make_builder()`, call
+   `_load_raw_tables()`, then
    replace `_pitches_df` with `MlbLabels.apply_global_filters(_pitches_df)`
    so both paths see the same rows. Compare `build_pitcher_data(666159)`
    with the league frame filtered to `pitcher_id == 666159`, with the `p_`
@@ -182,9 +196,8 @@ It prints elapsed time and the output paths. Look at
    the league frame's `call` is categorical, so `p_prev_call` will be too.
 2. **Batter equivalence.** The same for `build_batter_data(golden batter)`
    against the `b_` columns.
-3. **Chunked equals in-memory.** Run `build_league_data` into a temp dir
-   (`tempfile.mkdtemp`) with `actor_chunk_size=25` and
-   `file_format="pickle"`, then `load_model_table`. After sorting by keys,
+3. **Chunked equals in-memory.** Run `build_league_data` into `tmp_path`
+   with `actor_chunk_size=25`, then `load_model_table`. After sorting by keys,
    it equals `build_league_frame()`: the same column set, floats within
    `rtol=1e-5` (float32 vs float64).
 4. The manifest exists and has the listed keys. `mappings.sha1` is 40 hex
@@ -202,8 +215,8 @@ It prints elapsed time and the output paths. Look at
 2. **Same-row perturbation.** Pick rows that are the **last pitch in the
    data for both their pitcher and their batter**. Require at least 5 such
    rows. Perturbing them can't affect any other chosen row. Run two cases,
-   each on a fresh builder whose `_pitches_df` has been modified on those
-   rows:
+   each on a fresh builder from the `make_builder` fixture, whose
+   `_pitches_df` has been modified on those rows with `.loc`:
    - (a) change `code` (`"B"`↔`"S"`), `endSpeed` (+5), `startSpeed` (+5),
      `pX` (+1), `pZ` (+1), `zone` (to a different valid zone) and
      `launchSpeed`. Assert that, on those rows, every column with
@@ -215,7 +228,7 @@ It prints elapsed time and the output paths. Look at
 
 1. The full suite passes.
 2. **One real-data run** (not a unit test):
-   `python build_model_table.py --dbs "data/mlb_pitch_data_202[34].db"
+   `uv run python build_model_table.py --dbs "data/mlb_pitch_data_202[34].db"
    --seasons 2024 --table-name wp4_check`. Report:
    - wall time
    - `base.memory_usage(deep=True).sum()` (print it inside the method behind

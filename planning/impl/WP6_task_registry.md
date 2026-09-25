@@ -13,8 +13,7 @@ must beat. WP7's model class consumes this.
 
 ## API
 
-Use Python 3.8 typing (`typing.Callable`, `Optional`, `List`). Don't use
-`list[str]`.
+Use modern annotations (`list[str]`, `X | None`, `collections.abc.Callable`).
 
 ```python
 @dataclass(frozen=True)
@@ -27,11 +26,11 @@ class TaskSpec:
     baseline: Callable[[pd.DataFrame, pd.DataFrame], pd.Series]
         # (eval_df, train_df) -> class label (multiclass),
         #                        P(y=1) (binary), value (regression)
-    baseline_proba: Optional[Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]] = None
+    baseline_proba: Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame] | None = None
         # multiclass only: (eval_df, train_df) -> DataFrame, one column per
         # class, rows sum to 1
 
-TASKS: Dict[str, TaskSpec]
+TASKS: dict[str, TaskSpec]
 def get_task(name) -> TaskSpec                      # KeyError listing valid names
 def split_by_date(df, test_frac) -> (train_df, test_df)
 def task_data(df, task) -> (X, y, feature_cols, cat_cols)
@@ -94,7 +93,9 @@ The class labels must match the target's values exactly. Zone columns give
 
 ## Tests (`tests/test_tasks.py`)
 
-Use the test-DB `build_league_frame()`. Build it once in `setUpClass`.
+Use the session-scoped `league_frame` fixture from `tests/conftest.py`
+(read-only: `.copy()` before modifying). Parametrize per-task checks over
+`MlbTasks.TASKS`.
 
 1. Every task: `task_data` returns a non-empty X and a y with no NaN, and the
    target isn't in the features.
