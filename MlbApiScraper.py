@@ -1,4 +1,6 @@
+import calendar
 from datetime import datetime
+from io import StringIO
 import json
 import os
 import sqlite3 as lite
@@ -7,6 +9,27 @@ import requests
 import pandas as pd
 
 class MlbApiScraper:
+
+    # Baseball Savant blocks requests without a browser-like User-Agent.
+    SAVANT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MlbApiScraper/1.0)"}
+    SAVANT_CSV_URL = "https://baseballsavant.mlb.com/statcast_search/csv"
+
+    # statsapi's live-feed pitchData/hitData already covers pitch physics
+    # (spin rate/axis, break, release position/velocity, exit velo, launch
+    # angle, distance). These are the fields Savant has that statsapi doesn't.
+    SAVANT_GAP_COLUMNS = [
+        "estimated_ba_using_speedangle", "estimated_woba_using_speedangle",
+        "estimated_slg_using_speedangle", "woba_value", "woba_denom",
+        "babip_value", "iso_value", "launch_speed_angle",
+        "delta_home_win_exp", "delta_run_exp", "delta_pitcher_run_exp",
+        "home_win_exp", "bat_win_exp", "bat_speed", "swing_length",
+        "attack_angle", "attack_direction", "swing_path_tilt",
+        "intercept_ball_minus_batter_pos_x_inches",
+        "intercept_ball_minus_batter_pos_y_inches", "arm_angle",
+        "hyper_speed", "n_thruorder_pitcher", "n_priorpa_thisgame_player_at_bat",
+        "pitcher_days_since_prev_game", "batter_days_since_prev_game",
+        "pitcher_days_until_next_game", "batter_days_until_next_game",
+    ]
 
     def __init__(self,
                  seasons=None,
@@ -18,7 +41,7 @@ class MlbApiScraper:
                  save_dir="."):
 
         if seasons is None:
-            seasons = list(range(2010, 2020))
+            seasons = list(range(2010, 2027))
         elif not isinstance(seasons, (tuple, list)):
             seasons = [seasons]
         elif len(seasons) == 2:
@@ -74,19 +97,25 @@ class MlbApiScraper:
                                  2017: (4, 2),
                                  2018: (3, 29),
                                  2019: (3, 28),
-                                 2020: (3, 26)}
+                                 2020: (3, 26),
+                                 2021: (4, 1),
+                                 2022: (4, 7),
+                                 2023: (3, 30),
+                                 2024: (3, 28),
+                                 2025: (3, 27),
+                                 2026: (3, 26)}
 
         self.seasons = seasons
         self.months = months
         self.days = days
         self.teams = team_id_list
 
-        self.as_type = as_type.lower()
+        self.as_type = as_type.lower() if as_type is not None else None
         self.save_dir = save_dir
+        self.db_name = db_name
         if self.as_type == "csv":
             self.save_csv_loc = os.path.join(self.save_dir, self.db_name)
         elif self.as_type == "db":
-            self.db_name = db_name
             self.db_cnx = lite.connect(os.path.join(self.save_dir, self.db_name) + ".db")
 
         self.all_game_df = None
@@ -161,17 +190,33 @@ class MlbApiScraper:
             day_gid_list = [b["gamePk"] for b in d_dict if b["gameType"] in ["R", "F", "D", "L", "W"] and (b["teams"]["away"]["team"]["id"] in self.teams or b["teams"]["home"]["team"]["id"] in self.teams)]
             temp_id_list.append(day_gid_list)
 
-        all_id_list = [gid for gid_list in temp_id_list for gid in gid_list]
+        # A postponed-and-resumed/rescheduled game can appear under multiple
+        # calendar dates in the schedule listing (its original postponed
+        # date(s) plus its actual makeup date) while sharing one gamePk -
+        # dedupe so it isn't fetched/appended more than once.
+        all_id_list = list(dict.fromkeys(gid for gid_list in temp_id_list for gid in gid_list))
+
+        print(f"found {len(all_id_list)} games to scrape", flush=True)
 
         all_game_list, all_ab_list, all_pitch_list = [], [], []
-        for gid in all_id_list:
-            raw_data = self.get_api_game_data(gid=gid)
-            df_list = self.build_game_dataframes(raw_data)
+        for i, gid in enumerate(all_id_list):
+            try:
+                raw_data = self.get_api_game_data(gid=gid)
+                df_list = self.build_game_dataframes(raw_data)
+            except Exception as exc:
+                print(f"skipping game {gid}: {exc}", flush=True)
+                continue
+
             if not any([df is None for df in df_list]):
                 game_df, ab_df, pitch_df = df_list
                 all_game_list.append(game_df.reset_index(drop=True))
                 all_ab_list.append(ab_df.reset_index(drop=True))
                 all_pitch_list.append(pitch_df.reset_index(drop=True))
+
+            if (i + 1) % 50 == 0:
+                print(f"processed {i + 1}/{len(all_id_list)} games ({len(all_game_list)} kept)", flush=True)
+
+        print(f"done scraping games: {len(all_game_list)}/{len(all_id_list)} kept", flush=True)
 
         all_game_df = pd.concat(all_game_list, sort=False)
         all_ab_df = pd.concat(all_ab_list, sort=False)
@@ -185,11 +230,112 @@ class MlbApiScraper:
             all_game_df.to_csv(self.save_csv_loc + "_games.csv")
             all_ab_df.to_csv(self.save_csv_loc + "_abs.csv")
             all_pitch_df.to_csv(self.save_csv_loc + "_pitches.csv")
-        else:
-            self.all_game_df = all_game_df
-            self.all_ab_df = all_ab_df
-            self.all_pitch_df = all_pitch_df
+
+        self.all_game_df = all_game_df
+        self.all_ab_df = all_ab_df
+        self.all_pitch_df = all_pitch_df
+
+        return self
+
+    # Savant's CSV export silently truncates at this many rows (observed: a
+    # full-league month request comes back at exactly 25000 rows with no error
+    # or truncation flag). Chunk requests small enough to stay well under it,
+    # and warn loudly if a chunk ever comes close, since that means data is
+    # being silently dropped.
+    SAVANT_ROW_CAP = 25000
+
+    def _savant_date_chunks(self, chunk_days=1):
+
+        chunks = []
+        for season in self.seasons:
+            start_month, start_day = min(self.months), min(self.days)
+            end_month, end_day = max(self.months), max(self.days)
+            end_day = min(end_day, calendar.monthrange(season, end_month)[1])
+
+            chunk_start = datetime(season, start_month, start_day)
+            season_end = datetime(season, end_month, end_day)
+
+            while chunk_start <= season_end:
+                chunk_end = min(chunk_start + pd.Timedelta(days=chunk_days - 1), season_end)
+                chunks.append((chunk_start, chunk_end))
+                chunk_start = chunk_end + pd.Timedelta(days=1)
+
+        return chunks
+
+    def get_savant_csv(self, start_date, end_date):
+
+        params = {
+            "all": "true",
+            "hfSea": str(start_date.year) + "|",
+            "game_date_gt": start_date.strftime("%Y-%m-%d"),
+            "game_date_lt": end_date.strftime("%Y-%m-%d"),
+            "type": "details",
+        }
+
+        resp = requests.get(self.SAVANT_CSV_URL, params=params, headers=self.SAVANT_HEADERS, timeout=120)
+        resp.raise_for_status()
+
+        df = pd.read_csv(StringIO(resp.text))
+
+        if len(df) >= self.SAVANT_ROW_CAP:
+            print(f"WARNING: savant chunk {start_date.date()}-{end_date.date()} returned "
+                  f"{len(df)} rows (>= {self.SAVANT_ROW_CAP} cap) - likely truncated, "
+                  f"use a smaller chunk_days", flush=True)
+
+        if df.empty:
+            return df
+
+        # Match the game types statsapi already filters to: regular season,
+        # wild card, division series, league series, and world series.
+        df = df[df["game_type"].isin(["R", "F", "D", "L", "W"])]
+
+        return df
+
+    def get_savant_supplemental_data(self, chunk_days=1):
+
+        frames = []
+        for start_date, end_date in self._savant_date_chunks(chunk_days=chunk_days):
+            print(f"fetching savant data {start_date.date()} to {end_date.date()}", flush=True)
+            try:
+                df = self.get_savant_csv(start_date, end_date)
+            except Exception as exc:
+                print(f"skipping savant chunk {start_date.date()}-{end_date.date()}: {exc}", flush=True)
+                continue
+            if df.empty:
+                continue
+            print(f"  got {len(df)} savant rows", flush=True)
+
+            keep_cols = ["game_pk", "at_bat_number", "pitch_number"]
+            keep_cols += [c for c in self.SAVANT_GAP_COLUMNS if c in df.columns]
+            df = df[keep_cols].copy()
+
+            df["g_id_int"] = df["game_pk"]
+            df["ab_ind"] = df["at_bat_number"] - 1
+            df["p_ind"] = df["pitch_number"]
+            df = df.drop(columns=["game_pk", "at_bat_number", "pitch_number"])
+
+            frames.append(df)
+
+        self.savant_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+        return self
+
+    def merge_savant_data(self, resave=True):
+
+        if self.all_pitch_df is None or getattr(self, "savant_df", None) is None or self.savant_df.empty:
             return self
+
+        self.all_pitch_df = self.all_pitch_df.merge(
+            self.savant_df, on=["g_id_int", "ab_ind", "p_ind"], how="left"
+        )
+
+        if resave:
+            if self.as_type == "db":
+                self.all_pitch_df.to_sql(name="pitches", con=self.db_cnx, if_exists="replace")
+            elif self.as_type == "csv":
+                self.all_pitch_df.to_csv(self.save_csv_loc + "_pitches.csv")
+
+        return self
 
     def build_game_dictionary(self, game_json):
 
@@ -289,13 +435,20 @@ class MlbApiScraper:
                 "at_win_pct": game_data["teams"]["away"]["record"]["winningPercentage"],
                 "at_gms_plyd": game_data["teams"]["away"]["record"]["gamesPlayed"],
                 "stadium": game_data["venue"]["id"],
+                "day_night": game_data["datetime"].get("dayNight", None),
                 "weather_condition": game_data["weather"].pop("condition", None),
-                "temperature": game_data["weather"].pop("temp", None),
-                "wind_speed": game_data["weather"]["wind"].split(",")[0],
-                "wind_direction": game_data["weather"]["wind"].split(",")[-1].strip(),
                 "winning_pitcher": winner, #game_json["liveData"]["decisions"]["winner"]["id"],
                 "losing_pitcher": loser #game_json["liveData"]["decisions"]["loser"]["id"]
             }
+
+            temp_raw = game_data["weather"].pop("temp", None)
+            game_dict["temperature"] = int(temp_raw) if temp_raw not in (None, "") else None
+
+            wind_raw = game_data["weather"].pop("wind", None) or ""
+            wind_speed_str, _, wind_direction_str = wind_raw.partition(",")
+            wind_speed_str = wind_speed_str.strip().split(" ")[0]
+            game_dict["wind_speed"] = int(wind_speed_str) if wind_speed_str.isdigit() else None
+            game_dict["wind_direction"] = wind_direction_str.strip() or None
             plays_by_inning = [(pbi_dict["top"], pbi_dict["bottom"]) for pbi_dict in game_json["liveData"]["plays"]["playsByInning"]]
             all_ab_list = []
             for inning_inds in plays_by_inning:
@@ -345,7 +498,7 @@ class MlbApiScraper:
                         ab_info_dict["pitcher_id"] = play["matchup"]["pitcher"].pop("id", None)
                         ab_info_dict["pitcher_hand"] = play["matchup"]["pitchHand"].pop("code", None)
 
-                        pitches = [ev for ev in play["playEvents"] if "call" in list(ev["details"].keys())]
+                        pitches = [ev for ev in play["playEvents"] if ev.get("isPitch") and "pitchData" in ev]
 
                         ab_ind_tuple = (ab_info_dict["g_id_int"], ab_info_dict["ab_ind"])
                         ab_info_dict["pitches"] = get_pitch_dict(pitches, ab_ind_tuple)
@@ -389,36 +542,36 @@ class MlbApiScraper:
 
         player_dict = {}
         if self.as_type == "csv":
-            batter_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["batter_id"].unique()
-            pitcher_df = pd.read_csv(self.csv_save_loc + "_abs.csv")["pitcher_id"].unique()
+            batter_vals = pd.read_csv(self.save_csv_loc + "_abs.csv")["batter_id"].unique()
+            pitcher_vals = pd.read_csv(self.save_csv_loc + "_abs.csv")["pitcher_id"].unique()
         elif self.as_type == "db":
-            unique_batter_query = "select distinct batter_id from abs"
-            batter_df = pd.read_sql(unique_batter_query, self.db_cnx)
-            unique_pitcher_query = "select distinct pitcher_id from abs"
-            pitcher_df = pd.read_sql(unique_pitcher_query, self.db_cnx)
+            batter_vals = pd.read_sql("select distinct batter_id from abs", self.db_cnx)["batter_id"].unique()
+            pitcher_vals = pd.read_sql("select distinct pitcher_id from abs", self.db_cnx)["pitcher_id"].unique()
         else:
-            batter_df = self.all_ab_df["batter_id"].unique()
-            pitcher_df = self.all_ab_df["pitcher_id"].unique()
+            batter_vals = self.all_ab_df["batter_id"].unique()
+            pitcher_vals = self.all_ab_df["pitcher_id"].unique()
 
-        player_list = list(set(batter_df.tolist() + pitcher_df.tolist()))
+        player_list = list(set(batter_vals.tolist() + pitcher_vals.tolist()))
 
         for plyr_id in player_list:
             url = "https://statsapi.mlb.com/api/v1/people/" + str(plyr_id)
             id_dict = self.get_raw_url_data(url)
-            plyr_dict = json.loads(id_dict)
+            people = json.loads(id_dict).get("people", [])
+            if not people:
+                continue
+            plyr_dict = people[0]
             temp_dict = {}
 
             plyr_dict_vals = ["id", "firstName", "lastName", "birthDate", "birthCountry", "height", "weight", "draftYear", "strikeZoneTop", "strikeZoneBottom"]
             for val in plyr_dict_vals:
-                temp_dict[val] = plyr_dict[val]
-            plyr_pos_vals = list(plyr_dict["primaryPosition"].keys())
-            for pval in plyr_pos_vals:
-                temp_dict["pos" + pval] = plyr_dict["primaryPosition"][pval]
-            temp_dict["batHand"] = plyr_dict["batSide"]["code"]
-            temp_dict["pitchHand"] = plyr_dict["pitchHand"]["code"]
+                temp_dict[val] = plyr_dict.get(val)
+            for pval, pval_val in plyr_dict.get("primaryPosition", {}).items():
+                temp_dict["pos" + pval] = pval_val
+            temp_dict["batHand"] = plyr_dict.get("batSide", {}).get("code")
+            temp_dict["pitchHand"] = plyr_dict.get("pitchHand", {}).get("code")
             player_dict[plyr_id] = temp_dict
 
-        player_df = pd.DataFrame(player_dict, index=list(player_dict.keys()))
+        player_df = pd.DataFrame.from_dict(player_dict, orient="index")
 
         if self.as_type == "db":
             player_df.to_sql(name="players", con=self.db_cnx)
@@ -430,11 +583,18 @@ class MlbApiScraper:
 
 def main():
 
-    pfxs = MlbApiScraper(days=[1, 30], months=[5,6], seasons=[2018, 2019], as_type="db", db_name="2010_2019_seasons_temp", save_dir="data")
+    pfxs = MlbApiScraper(days=[1, 30], months=[3, 9], seasons=[2024], as_type="db", db_name="mlb_pitch_data_2024", save_dir="data")
 
+    print("scraping statsapi game data...", flush=True)
     pfxs.get_all_api_game_dfs()
 
-    pfxs.get_player_data()
+    print("fetching savant supplemental data...", flush=True)
+    pfxs.get_savant_supplemental_data()
+
+    print("merging savant data onto pitches...", flush=True)
+    pfxs.merge_savant_data()
+
+    print("done", flush=True)
 
 if __name__ == "__main__":
     main()

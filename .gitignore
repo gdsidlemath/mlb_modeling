@@ -2,3 +2,6 @@
 *.db
 *.json
 .idea/
+__pycache__/
+catboost_info/
+*.log
